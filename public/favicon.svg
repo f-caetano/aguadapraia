@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <style>
+    .sun { stroke: #f59e0b; }
+    .wave { stroke: #0078d4; }
+    .horizon { stroke: #66899b; }
+    @media (prefers-color-scheme: dark) {
+      .sun { stroke: #fbbf24; }
+      .wave { stroke: #4da6ff; }
+      .horizon { stroke: #8aa9b8; }
+    }
+  </style>
+  <path class="sun" d="M9 17 A7 7 0 0 1 23 17" stroke-width="2.4" stroke-linecap="round"/>
+  <line class="sun" x1="16" y1="5" x2="16" y2="8.5" stroke-width="2" stroke-linecap="round"/>
+  <line class="sun" x1="7.5" y1="8.5" x2="9.8" y2="10.8" stroke-width="2" stroke-linecap="round"/>
+  <line class="sun" x1="24.5" y1="8.5" x2="22.2" y2="10.8" stroke-width="2" stroke-linecap="round"/>
+  <line class="sun" x1="4.5" y1="17" x2="7.5" y2="17" stroke-width="2" stroke-linecap="round"/>
+  <line class="sun" x1="27.5" y1="17" x2="24.5" y2="17" stroke-width="2" stroke-linecap="round"/>
+  <line class="horizon" x1="2" y1="17" x2="30" y2="17" stroke-width="1.2" opacity="0.55"/>
+  <path class="wave" d="M2 21 Q7 18 12 21 Q17 24 22 21 Q27 18 30 21" stroke-width="2" stroke-linecap="round"/>
+  <path class="wave" d="M2 26 Q7 23 12 26 Q17 29 22 26 Q27 23 30 26" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+</svg>
