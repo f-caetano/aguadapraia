@@ -9,9 +9,11 @@ import type {
   HistoryPoint,
   HourlyBeachReading,
   Territory,
+  TerritoryAggregate,
+  TerritoryFilter,
 } from '../types'
 import { z } from 'zod'
-import { classifyDate, lisbonDate } from '../lib/date-classification'
+import { classifyDate } from '../lib/date-classification'
 import { canonicalBeachName } from '../lib/beach-name'
 import { publicAssetUrl } from '../lib/public-asset'
 
@@ -20,9 +22,18 @@ function dataUrl(
   apiBase: string | undefined = import.meta.env.VITE_DATA_API_BASE as string | undefined,
   baseUrl: string = import.meta.env.BASE_URL,
 ): string {
-  if (apiBase) {
-    const base = apiBase.endsWith('/') ? apiBase.slice(0, -1) : apiBase
-    return `${base}/${subpath.replace(/\.json$/, '')}`
+  const localApiBase =
+    apiBase ??
+    (typeof window !== 'undefined' &&
+    (window.location.hostname === '127.0.0.1' ||
+      window.location.hostname === 'localhost')
+      ? '/api/data'
+      : undefined)
+  if (localApiBase) {
+    const base = localApiBase.endsWith('/')
+      ? localApiBase.slice(0, -1)
+      : localApiBase
+    return `${base}/${subpath.replace(/\.json(?=$|\?)/, '')}`
   }
   return publicAssetUrl(`data/${subpath}`, baseUrl)
 }
@@ -126,40 +137,39 @@ export interface TimelinePoint {
 export interface TimelineIndexData {
   schemaVersion: number
   dates: string[]
-  months: string[]
   generatedAt: string
 }
 
-export interface TimelineMonthData {
+export interface EvolutionSummaryData {
   schemaVersion: number
-  month: string
+  start: string
+  end: string
   dates: string[]
+  aggregates: Array<Omit<TerritoryAggregate, 'kind'>>
+  generatedAt: string
+}
+
+export interface EvolutionDateData {
+  schemaVersion: number
+  date: string
   points: TimelinePoint[]
   generatedAt: string
 }
 
-interface TimelineMonthCacheEntry {
-  promise: Promise<TimelineMonthData>
-  expiresAt: number
+export interface EvolutionBeachHistoriesData {
+  schemaVersion: number
+  start: string
+  end: string
+  histories: Array<{
+    beachId: string
+    points: TimelinePoint[]
+  }>
+  generatedAt: string
 }
 
 interface DayDetailCacheEntry {
   promise: Promise<BeachDayDetail>
   expiresAt: number
-}
-
-const monthlyCache = new Map<string, TimelineMonthCacheEntry>()
-const CURRENT_MONTH_CACHE_MS = 60_000
-
-function lisbonMonth(date = new Date()): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Lisbon',
-    year: 'numeric',
-    month: '2-digit',
-  }).formatToParts(date)
-  const value = (type: Intl.DateTimeFormatPartTypes) =>
-    parts.find((part) => part.type === type)?.value ?? ''
-  return `${value('year')}-${value('month')}`
 }
 
 const rawBeachSchema: z.ZodType<RawBeach> = z.object({
@@ -267,17 +277,52 @@ const timelinePointSchema: z.ZodType<TimelinePoint> = z.object({
 const timelineIndexSchema: z.ZodType<TimelineIndexData> = z.object({
   schemaVersion: z.number().int(),
   dates: z.array(z.string().date()),
-  months: z.array(z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/)),
   generatedAt: z.string().datetime({ offset: true }),
 })
 
-const timelineMonthSchema: z.ZodType<TimelineMonthData> = z.object({
+const metricAggregateSchema = z.object({
+  min: z.number(),
+  avg: z.number(),
+  max: z.number(),
+  coverage: z.number().min(0).max(1),
+})
+
+const evolutionAggregateSchema = z.object({
+  date: z.string().date(),
+  water: metricAggregateSchema.nullable(),
+  air: metricAggregateSchema.nullable(),
+  wind: metricAggregateSchema.nullable(),
+})
+
+const evolutionSummarySchema: z.ZodType<EvolutionSummaryData> = z.object({
   schemaVersion: z.number().int(),
-  month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  start: z.string().date(),
+  end: z.string().date(),
   dates: z.array(z.string().date()),
+  aggregates: z.array(evolutionAggregateSchema),
+  generatedAt: z.string().datetime({ offset: true }),
+})
+
+const evolutionDateSchema: z.ZodType<EvolutionDateData> = z.object({
+  schemaVersion: z.number().int(),
+  date: z.string().date(),
   points: z.array(timelinePointSchema),
   generatedAt: z.string().datetime({ offset: true }),
 })
+
+const evolutionBeachHistoriesSchema: z.ZodType<EvolutionBeachHistoriesData> =
+  z.object({
+    schemaVersion: z.number().int(),
+    start: z.string().date(),
+    end: z.string().date(),
+    histories: z.array(
+      z.object({
+        beachId: z.string().min(1),
+        points: z.array(timelinePointSchema),
+      }),
+    ),
+  generatedAt: z.string().datetime({ offset: true }),
+  })
 
 
 const hourlyReadingSchema: z.ZodType<HourlyBeachReading> = z.object({
@@ -312,6 +357,9 @@ const beachDayDetailSchema: z.ZodType<BeachDayDetail> = z.object({
 
 const dayDetailCache = new Map<string, DayDetailCacheEntry>()
 const CURRENT_DAY_DETAIL_CACHE_MS = 60_000
+let timelineIndexCache:
+  | { promise: Promise<TimelineIndexData>; expiresAt: number }
+  | undefined
 
 function lisbonCalendarDate(date = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -336,47 +384,6 @@ function requiredNumber(value: number | null, context: string) {
   return value
 }
 
-function previousDate(date: string): string {
-  const value = new Date(`${date}T12:00:00Z`)
-  value.setUTCDate(value.getUTCDate() - 1)
-  return value.toISOString().slice(0, 10)
-}
-
-function monthFromDate(date: string): string {
-  return date.slice(0, 7)
-}
-
-function monthsForRange(startDate: string, endDate: string): string[] {
-  if (startDate > endDate) return []
-  const months: string[] = []
-  const cursor = new Date(`${monthFromDate(startDate)}-01T12:00:00Z`)
-  const endMonth = monthFromDate(endDate)
-  while (true) {
-    const month = cursor.toISOString().slice(0, 7)
-    months.push(month)
-    if (month >= endMonth) break
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1)
-  }
-  return months
-}
-
-function mergeHistoryPoints(
-  basePoints: readonly HistoryPoint[],
-  nextPoints: readonly HistoryPoint[],
-  forecastDates: readonly string[],
-): HistoryPoint[] {
-  const merged = new Map<string, HistoryPoint>()
-  for (const point of basePoints) merged.set(point.date, point)
-  for (const point of nextPoints) {
-    merged.set(point.date, {
-      ...point,
-      label: dateLabel(point.date),
-      kind: classifyDate(point.date, forecastDates),
-    })
-  }
-  return [...merged.values()].sort((first, second) => first.date.localeCompare(second.date))
-}
-
 function historyPointFromDaily(
   forecast: DailyBeachForecast,
   forecastDates: readonly string[],
@@ -395,7 +402,7 @@ function historyPointFromDaily(
   }
 }
 
-function historyPointFromTimeline(
+export function historyPointFromTimeline(
   point: TimelinePoint,
   forecastDates: readonly string[],
 ): HistoryPoint {
@@ -531,42 +538,82 @@ function forecastDatesFromPayload(payload: RawPayload): string[] {
 }
 
 export async function loadTimelineIndex(): Promise<TimelineIndexData> {
-  const response = await fetch(dataUrl('timeline/index.json'), {
-    cache: 'default',
-  })
-  if (!response.ok) {
-    throw new Error('Published timeline index is unavailable')
+  if (timelineIndexCache && timelineIndexCache.expiresAt > Date.now()) {
+    return timelineIndexCache.promise
   }
-  return timelineIndexSchema.parse(await response.json())
-}
-
-export async function loadTimelineMonth(month: string): Promise<TimelineMonthData> {
-  const cached = monthlyCache.get(month)
-  if (cached && cached.expiresAt > Date.now()) return cached.promise
-  if (cached) monthlyCache.delete(month)
-
-  const request = (async () => {
-    const response = await fetch(dataUrl(`timeline/${month}.json`), {
+  const promise = (async () => {
+    const response = await fetch(dataUrl('evolution/index.json'), {
       cache: 'default',
     })
     if (!response.ok) {
-      throw new Error(`Published timeline is unavailable for ${month}`)
+      throw new Error('Published timeline index is unavailable')
     }
-    return timelineMonthSchema.parse(await response.json())
+    return timelineIndexSchema.parse(await response.json())
   })()
-
-  const entry = {
-    promise: request,
-    expiresAt:
-      month < lisbonMonth() ? Number.POSITIVE_INFINITY : Date.now() + CURRENT_MONTH_CACHE_MS,
-  }
-  monthlyCache.set(month, entry)
-  request.catch(() => {
-    if (monthlyCache.get(month) === entry) {
-      monthlyCache.delete(month)
-    }
+  const entry = { promise, expiresAt: Date.now() + 60_000 }
+  timelineIndexCache = entry
+  promise.catch(() => {
+    if (timelineIndexCache === entry) timelineIndexCache = undefined
   })
-  return request
+  return promise
+}
+
+export function resetEvolutionIndexCache(): void {
+  timelineIndexCache = undefined
+}
+
+export async function loadEvolutionSummary(
+  start: string,
+  end: string,
+  territory: TerritoryFilter,
+  signal?: AbortSignal,
+): Promise<EvolutionSummaryData> {
+  const query = new URLSearchParams({ start, end, territory })
+  const response = await fetch(
+    dataUrl(`evolution/summary.json?${query.toString()}`),
+    { cache: 'default', signal },
+  )
+  if (!response.ok) {
+    throw new Error(`Evolution summary unavailable (${response.status})`)
+  }
+  return evolutionSummarySchema.parse(await response.json())
+}
+
+export async function loadEvolutionDate(
+  date: string,
+  territory: TerritoryFilter,
+  signal?: AbortSignal,
+): Promise<EvolutionDateData> {
+  const query = new URLSearchParams({ territory })
+  const response = await fetch(
+    dataUrl(`evolution/date/${date}.json?${query.toString()}`),
+    { cache: 'default', signal },
+  )
+  if (!response.ok) {
+    throw new Error(`Evolution date unavailable (${response.status})`)
+  }
+  return evolutionDateSchema.parse(await response.json())
+}
+
+export async function loadEvolutionBeachHistories(
+  beachIds: readonly string[],
+  start: string,
+  end: string,
+  signal?: AbortSignal,
+): Promise<EvolutionBeachHistoriesData> {
+  const query = new URLSearchParams({
+    ids: beachIds.join(','),
+    start,
+    end,
+  })
+  const response = await fetch(
+    dataUrl(`evolution/beaches.json?${query.toString()}`),
+    { cache: 'default', signal },
+  )
+  if (!response.ok) {
+    throw new Error(`Evolution beach histories unavailable (${response.status})`)
+  }
+  return evolutionBeachHistoriesSchema.parse(await response.json())
 }
 
 
@@ -606,10 +653,6 @@ export async function loadBeachDayDetail(
     }
   })
   return request
-}
-
-export function resetTimelineMonthCache(): void {
-  monthlyCache.clear()
 }
 
 export function resolveDateIndex(
@@ -653,66 +696,8 @@ export async function loadBeachDataset(): Promise<BeachDataset> {
 export async function loadBackgroundHistory(
   dataset: BeachDataset,
 ): Promise<BeachDataset> {
-  const indexResponse = await fetch(dataUrl('timeline/index.json'), { cache: 'default' })
-  if (!indexResponse.ok) {
-    throw new Error('Published timeline index is unavailable')
-  }
-  const index = timelineIndexSchema.parse(await indexResponse.json())
-
-  const archiveDates = index.dates.slice(-30)
-  if (archiveDates.length === 0) {
-    return { ...dataset, historyDates: index.dates }
-  }
-
-  const startDate = archiveDates[0]!
-  const endDate = dataset.forecastDates[dataset.forecastDates.length - 1] ?? startDate
-  const result = await loadTimelineRange(dataset, startDate, endDate)
-
-  return { ...result, historyDates: index.dates }
-}
-
-export async function loadTimelineRange(
-  dataset: BeachDataset,
-  startDate: string,
-  endDate: string,
-  now = new Date(),
-): Promise<BeachDataset> {
-  if (startDate > endDate) {
-    throw new Error('Invalid range')
-  }
-
-  const today = lisbonDate(now)
-  const historyEnd = endDate < today ? endDate : previousDate(today)
-  const months = startDate <= historyEnd
-    ? monthsForRange(startDate, historyEnd)
-    : []
-  const shards = await Promise.all(months.map((month) => loadTimelineMonth(month)))
-  const pointsByBeach = new Map<string, HistoryPoint[]>()
-
-  for (const shard of shards) {
-    for (const point of shard.points) {
-      if (point.date < startDate || point.date > historyEnd) continue
-      const points = pointsByBeach.get(point.beachId) ?? []
-      points.push(historyPointFromTimeline(point, dataset.forecastDates))
-      pointsByBeach.set(point.beachId, points)
-    }
-  }
-
-  return {
-    ...dataset,
-    beaches: dataset.beaches.map((beach) => ({
-      ...beach,
-      history: mergeHistoryPoints(
-        beach.history.filter(
-          (point) =>
-            point.kind !== 'history' ||
-            (point.date >= startDate && point.date <= historyEnd),
-        ),
-        pointsByBeach.get(beach.id) ?? [],
-        dataset.forecastDates,
-      ),
-    })),
-  }
+  const index = await loadTimelineIndex()
+  return { ...dataset, historyDates: index.dates }
 }
 
 export function evolutionDefaultRange(

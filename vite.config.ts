@@ -19,11 +19,29 @@ export function resolveBaseUrl(environment: NodeJS.ProcessEnv) {
 
 export default defineConfig(({ mode }) => {
   const environment = { ...process.env, ...loadEnv(mode, process.cwd(), '') }
+  const apiProxy = {
+    '/api/data': {
+      target:
+        'https://ca-aguadapraia-api-prod.jollysky-7570b695.spaincentral.azurecontainerapps.io',
+      changeOrigin: true,
+      secure: true,
+      headers: {
+        Origin:
+          'https://victorious-flower-0d1b0de03.7.azurestaticapps.net',
+      },
+    },
+  }
   return {
     base: resolveBaseUrl(environment),
     plugins: [react()],
     build: {
       chunkSizeWarningLimit: 1000,
+    },
+    server: {
+      proxy: apiProxy,
+    },
+    preview: {
+      proxy: apiProxy,
     },
     resolve: {
       alias: {

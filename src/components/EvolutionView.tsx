@@ -22,10 +22,14 @@ import {
 import { ArrowUp, Droplets, Pause, Play, Plus, ThermometerSun, Wind, X } from 'lucide-react'
 import {
   evolutionDefaultRange,
+  historyPointFromTimeline,
   loadBeachDayDetail,
+  loadEvolutionBeachHistories,
+  loadEvolutionDate,
+  loadEvolutionSummary,
   loadTimelineIndex,
-  loadTimelineRange,
   resolveDateIndex,
+  type TimelinePoint,
 } from '../data/api'
 import { getCopy, type Language } from '../i18n'
 import { beachColor } from '../lib/beach-palette'
@@ -45,6 +49,7 @@ import type {
   BeachDataset,
   BeachDayDetail,
   BeachViewModel,
+  HistoryPoint,
   MapMetric,
   SettingsMapMetric,
   TerritoryAggregate,
@@ -60,9 +65,10 @@ const PortugalMap = lazy(() => import('./PortugalMap'))
 const MetricHistoryChart = lazy(() => import('./MetricHistoryChart'))
 
 interface RangeResult {
-  beaches: BeachViewModel[]
   start: string
   end: string
+  dates: string[]
+  aggregates: Array<Omit<TerritoryAggregate, 'kind'>>
 }
 
 function beachForDate(
@@ -241,6 +247,9 @@ export default function EvolutionView({
   const activeRef = useRef(true)
   const dayDetailTokenRef = useRef(0)
   const compareDayTokenRef = useRef(0)
+  const dateRequestRef = useRef<AbortController | null>(null)
+  const historyRequestRef = useRef<AbortController | null>(null)
+  const datePrefetchesRef = useRef(new Set<string>())
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
   const [isMobile, setIsMobile] = useState(
     () =>
@@ -276,7 +285,16 @@ export default function EvolutionView({
     ReadonlyMap<string, BeachDayDetail>
   >(new Map())
   const [compareDayLoading, setCompareDayLoading] = useState(false)
+  const [datePointsByKey, setDatePointsByKey] = useState<
+    ReadonlyMap<string, TimelinePoint[]>
+  >(new Map())
+  const [historyByBeachId, setHistoryByBeachId] = useState<
+    ReadonlyMap<string, HistoryPoint[]>
+  >(new Map())
+  const [dateLoading, setDateLoading] = useState(false)
+  const [rangeHistoryLoading, setRangeHistoryLoading] = useState(false)
   const initializedRef = useRef(false)
+  const lastAppliedTerritoryRef = useRef(territory)
   const tokenRef = useRef(0)
   const [availableHistoryDates, setAvailableHistoryDates] = useState<string[]>([])
   const [availableHistoryLoaded, setAvailableHistoryLoaded] = useState(false)
@@ -285,6 +303,8 @@ export default function EvolutionView({
     activeRef.current = true
     return () => {
       activeRef.current = false
+      dateRequestRef.current?.abort()
+      historyRequestRef.current?.abort()
     }
   }, [])
 
@@ -318,19 +338,27 @@ export default function EvolutionView({
     setRangeLoading(true)
     setRangeError(null)
     try {
-      const loaded = await loadTimelineRange(dataset, start, end)
+      const loaded = await loadEvolutionSummary(start, end, territory)
       if (token !== tokenRef.current || !activeRef.current) return
 
-      const newAllDates = new Set<string>()
-      for (const beach of loaded.beaches) {
-        for (const point of beach.history) newAllDates.add(point.date)
-      }
-      for (const date of dataset.forecastDates) newAllDates.add(date)
-      const sortedDates = [...newAllDates].sort().filter((value) => value >= start && value <= end)
+      const sortedDates = [
+        ...new Set([
+          ...loaded.dates,
+          ...dataset.forecastDates.filter(
+            (date) => date >= start && date <= end,
+          ),
+        ]),
+      ].sort()
       const today = preferredForecastDate(dataset.forecastDates)
       const newIndex = resolveDateIndex(sortedDates, today, end)
 
-      setRangeResult({ beaches: loaded.beaches, start, end })
+      setRangeResult({
+        start,
+        end,
+        dates: sortedDates,
+        aggregates: loaded.aggregates,
+      })
+      setHistoryByBeachId(new Map())
       setDateIndex(newIndex)
     } catch {
       if (token !== tokenRef.current || !activeRef.current) return
@@ -340,11 +368,12 @@ export default function EvolutionView({
         setRangeLoading(false)
       }
     }
-  }, [copy.dataUnavailable, copy.invalidRange, dataset])
+  }, [copy.dataUnavailable, copy.invalidRange, dataset.forecastDates, territory])
 
   useEffect(() => {
     if (!availableHistoryLoaded || initializedRef.current) return
     initializedRef.current = true
+    lastAppliedTerritoryRef.current = territory
     const defaults = evolutionDefaultRange(availableHistoryDates, dataset.forecastDates)
     setPendingDay(preferredForecastDate(dataset.forecastDates) || defaults.endDate)
     setPendingStart(defaults.startDate)
@@ -354,28 +383,31 @@ export default function EvolutionView({
     }
   }, [applyRange, availableHistoryDates, availableHistoryLoaded, dataset.forecastDates])
 
-  const sourceBeaches = rangeResult?.beaches ?? dataset.beaches
+  useEffect(() => {
+    if (
+      !initializedRef.current ||
+      lastAppliedTerritoryRef.current === territory
+    ) {
+      return
+    }
+    lastAppliedTerritoryRef.current = territory
+    if (pendingStart && pendingEnd && pendingStart <= pendingEnd) {
+      void applyRange(pendingStart, pendingEnd)
+    }
+  }, [applyRange, pendingEnd, pendingStart, territory])
+
   const rangeStart = rangeResult?.start ?? ''
   const rangeEnd = rangeResult?.end ?? ''
-  const allDates = useMemo(() => {
-    const dates = new Set<string>()
-    for (const beach of sourceBeaches) {
-      for (const point of beach.history) dates.add(point.date)
-    }
-    for (const date of dataset.forecastDates) dates.add(date)
-    return [...dates]
-      .sort()
-      .filter((date) => (!rangeStart || date >= rangeStart) && (!rangeEnd || date <= rangeEnd))
-  }, [dataset.forecastDates, rangeEnd, rangeStart, sourceBeaches])
+  const allDates = rangeResult?.dates ?? dataset.forecastDates
 
   const activeDate = allDates[dateIndex] ?? ''
   const activeKind = classifyDate(activeDate, dataset.forecastDates)
   const territoryBeaches = useMemo(
     () =>
       territory === 'all'
-        ? sourceBeaches
-        : sourceBeaches.filter((beach) => beach.territory === territory),
-    [sourceBeaches, territory],
+        ? dataset.beaches
+        : dataset.beaches.filter((beach) => beach.territory === territory),
+    [dataset.beaches, territory],
   )
 
   useEffect(() => {
@@ -408,6 +440,95 @@ export default function EvolutionView({
     setMapMetric(initialMapMetric)
   }, [initialMapMetric])
 
+  const activeDateCacheKey = `${territory}|${activeDate}`
+  const prefetchFollowingDates = useCallback(() => {
+    const nextDates = allDates
+      .slice(dateIndex + 1, dateIndex + 3)
+      .filter(
+        (date) =>
+          classifyDate(date, dataset.forecastDates) === 'history' &&
+          !datePointsByKey.has(`${territory}|${date}`) &&
+          !datePrefetchesRef.current.has(`${territory}|${date}`),
+      )
+
+    for (const date of nextDates) {
+      const key = `${territory}|${date}`
+      datePrefetchesRef.current.add(key)
+      void loadEvolutionDate(date, territory)
+        .then((prefetched) => {
+          if (!activeRef.current) return
+          setDatePointsByKey((current) => {
+            const next = new Map(current)
+            next.set(key, prefetched.points)
+            return next
+          })
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          datePrefetchesRef.current.delete(key)
+        })
+    }
+  }, [
+    allDates,
+    dateIndex,
+    dataset.forecastDates,
+    datePointsByKey,
+    territory,
+  ])
+
+  useEffect(() => {
+    if (!activeDate || activeKind !== 'history') {
+      setDateLoading(false)
+      return
+    }
+    if (datePointsByKey.has(activeDateCacheKey)) {
+      setDateLoading(false)
+      prefetchFollowingDates()
+      return
+    }
+
+    dateRequestRef.current?.abort()
+    const controller = new AbortController()
+    dateRequestRef.current = controller
+    setDateLoading(true)
+
+    loadEvolutionDate(activeDate, territory, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted || !activeRef.current) return
+        setDatePointsByKey((current) => {
+          const next = new Map(current)
+          next.set(activeDateCacheKey, result.points)
+          return next
+        })
+
+        prefetchFollowingDates()
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof DOMException &&
+          error.name === 'AbortError'
+        ) {
+          return
+        }
+        if (activeRef.current) setRangeError(copy.dataUnavailable)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && activeRef.current) {
+          setDateLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [
+    activeDate,
+    activeDateCacheKey,
+    activeKind,
+    copy.dataUnavailable,
+    datePointsByKey,
+    prefetchFollowingDates,
+    territory,
+  ])
+
   useEffect(() => {
     if (selectedId && !territoryBeaches.some((beach) => beach.id === selectedId)) {
       setSelectedId('')
@@ -422,23 +543,64 @@ export default function EvolutionView({
 
   const historicalBeaches = useMemo((): BeachViewModel[] => {
     if (!activeDate) return []
+    const historicalPoints = new Map(
+      (datePointsByKey.get(activeDateCacheKey) ?? []).map((point) => [
+        point.beachId,
+        point,
+      ]),
+    )
     return territoryBeaches.flatMap((beach) => {
-      const candidate = beachForDate(beach, activeDate, mapMetric)
+      const historicalPoint = historicalPoints.get(beach.id)
+      const candidate =
+        activeKind === 'history'
+          ? historicalPoint
+            ? beachForDate(
+                {
+                  ...beach,
+                  history: [
+                    historyPointFromTimeline(
+                      historicalPoint,
+                      dataset.forecastDates,
+                    ),
+                  ],
+                },
+                activeDate,
+                mapMetric,
+              )
+            : null
+          : beachForDate(beach, activeDate, mapMetric)
       return candidate ? [candidate] : []
     })
-  }, [activeDate, mapMetric, territoryBeaches])
+  }, [
+    activeDate,
+    activeDateCacheKey,
+    activeKind,
+    dataset.forecastDates,
+    datePointsByKey,
+    mapMetric,
+    territoryBeaches,
+  ])
 
-  const territoryAggregates = useMemo(
-    () =>
-      allDates.map((date) =>
-        computeTerritoryAggregate(
-          territoryBeaches,
-          date,
-          classifyDate(date, dataset.forecastDates),
-        ),
-      ),
-    [allDates, dataset.forecastDates, territoryBeaches],
-  )
+  const territoryAggregates = useMemo(() => {
+    const serverAggregates = new Map(
+      (rangeResult?.aggregates ?? []).map((aggregate) => [
+        aggregate.date,
+        aggregate,
+      ]),
+    )
+    return allDates.map((date) => {
+      const kind = classifyDate(date, dataset.forecastDates)
+      const serverAggregate = serverAggregates.get(date)
+      return serverAggregate
+        ? { ...serverAggregate, kind }
+        : computeTerritoryAggregate(territoryBeaches, date, kind)
+    })
+  }, [
+    allDates,
+    dataset.forecastDates,
+    rangeResult?.aggregates,
+    territoryBeaches,
+  ])
 
   const aggregateByDate = useMemo(
     () => new Map(territoryAggregates.map((aggregate) => [aggregate.date, aggregate])),
@@ -466,14 +628,93 @@ export default function EvolutionView({
       }),
     [compareIds, territoryBeaches],
   )
+  const selectedHistory = selectedBeach
+    ? historyByBeachId.get(selectedBeach.id) ?? []
+    : []
+
+  useEffect(() => {
+    if (
+      viewMode === 'one-day' ||
+      !rangeStart ||
+      !rangeEnd ||
+      !selectedBeach
+    ) {
+      setRangeHistoryLoading(false)
+      return
+    }
+    const requestedIds = [
+      selectedBeach.id,
+      ...compareBeaches.slice(0, 3).map((beach) => beach.id),
+    ]
+    const missingIds = requestedIds.filter(
+      (id) => !historyByBeachId.has(id),
+    )
+    if (missingIds.length === 0) {
+      setRangeHistoryLoading(false)
+      return
+    }
+
+    historyRequestRef.current?.abort()
+    const controller = new AbortController()
+    historyRequestRef.current = controller
+    setRangeHistoryLoading(true)
+
+    loadEvolutionBeachHistories(
+      missingIds,
+      rangeStart,
+      rangeEnd,
+      controller.signal,
+    )
+      .then((result) => {
+        if (controller.signal.aborted || !activeRef.current) return
+        setHistoryByBeachId((current) => {
+          const next = new Map(current)
+          for (const history of result.histories) {
+            next.set(
+              history.beachId,
+              history.points.map((point) =>
+                historyPointFromTimeline(point, dataset.forecastDates),
+              ),
+            )
+          }
+          return next
+        })
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof DOMException &&
+          error.name === 'AbortError'
+        ) {
+          return
+        }
+        if (activeRef.current) setRangeError(copy.dataUnavailable)
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && activeRef.current) {
+          setRangeHistoryLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [
+    compareBeaches,
+    copy.dataUnavailable,
+    dataset.forecastDates,
+    historyByBeachId,
+    rangeEnd,
+    rangeStart,
+    selectedBeach,
+    viewMode,
+  ])
+
   const compareHistories = useMemo(
     () =>
       compareBeaches.map((beach) => ({
         beach,
-        history: beach.history,
+        history: historyByBeachId.get(beach.id) ?? [],
         displayName: shortNameById.get(beach.id),
       })),
-    [compareBeaches, shortNameById],
+    [compareBeaches, historyByBeachId, shortNameById],
   )
   const singleDayMode = allDates.length === 1 || viewMode === 'one-day'
   const comparisonLimit = singleDayMode ? 1 : 3
@@ -637,8 +878,7 @@ export default function EvolutionView({
         .filter(
           (beach) =>
             beach.id !== selectedId &&
-            !compareIds.includes(beach.id) &&
-            beach.history.length > 0,
+            !compareIds.includes(beach.id),
         )
         .sort((first, second) => first.name.localeCompare(second.name, language)),
     [compareIds, language, selectedId, territoryBeaches],
@@ -659,7 +899,22 @@ export default function EvolutionView({
     () =>
       selectedBeach
         ? [selectedBeach, ...compareBeaches.slice(0, comparisonLimit)].map((beach) => {
-            const point = beach.history.find((entry) => entry.date === activeDate) ?? null
+            const cachedPoint = (
+              datePointsByKey.get(activeDateCacheKey) ?? []
+            ).find((entry) => entry.beachId === beach.id)
+            const point =
+              (historyByBeachId.get(beach.id) ?? []).find(
+                (entry) => entry.date === activeDate,
+              ) ??
+              (cachedPoint
+                ? historyPointFromTimeline(
+                    cachedPoint,
+                    dataset.forecastDates,
+                  )
+                : beach.history.find(
+                    (entry) => entry.date === activeDate,
+                  )) ??
+              null
             const isSelected = beach.id === selectedId
             const detail = isSelected ? dayDetail : compareDayDetails.get(beach.id)
             return {
@@ -679,7 +934,11 @@ export default function EvolutionView({
       compareBeaches,
       compareDayDetails,
       comparisonLimit,
+      activeDateCacheKey,
+      dataset.forecastDates,
+      datePointsByKey,
       dayDetail,
+      historyByBeachId,
       selectedBeach,
       selectedId,
       shortNameById,
@@ -739,6 +998,13 @@ export default function EvolutionView({
           setIsPlaying(false)
           return current
         }
+        const nextDate = allDates[next]
+        if (
+          classifyDate(nextDate, dataset.forecastDates) === 'history' &&
+          !datePointsByKey.has(`${territory}|${nextDate}`)
+        ) {
+          return current
+        }
         if (next >= allDates.length - 1) {
           setIsPlaying(false)
         }
@@ -749,7 +1015,15 @@ export default function EvolutionView({
     return () => {
       if (playRef.current) clearTimeout(playRef.current)
     }
-  }, [allDates.length, dateIndex, isPlaying, prefersReducedMotion])
+  }, [
+    allDates,
+    dataset.forecastDates,
+    dateIndex,
+    datePointsByKey,
+    isPlaying,
+    prefersReducedMotion,
+    territory,
+  ])
 
   function handleSelect(id: string) {
     if (selectedId && id !== selectedId) {
@@ -1084,9 +1358,12 @@ export default function EvolutionView({
               }}
             />
           </Suspense>
-          {rangeLoading && (
+          {(rangeLoading || dateLoading) && (
             <div className="map-loading evolution-range-loading">
-              <LoadingIndicator variant="compact" label={copy.loadingRange} />
+              <LoadingIndicator
+                variant="compact"
+                label={rangeLoading ? copy.loadingRange : copy.loading}
+              />
             </div>
           )}
 
@@ -1799,8 +2076,14 @@ export default function EvolutionView({
                     <small>({metricUnit})</small>
                   </strong>
                 </div>
+                {rangeHistoryLoading && (
+                  <LoadingIndicator
+                    variant="compact"
+                    label={copy.loadingHistory}
+                  />
+                )}
                 <MetricHistoryChart
-                  history={selectedBeach.history}
+                  history={selectedHistory}
                   forecasts={selectedBeach.daily}
                   language={language}
                   windUnit={windUnit}

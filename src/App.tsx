@@ -7,7 +7,7 @@ import {
   Feather,
   List,
   ListFilter,
-  Map,
+  Map as MapIcon,
   Search,
   ThermometerSun,
   TrendingUp,
@@ -22,7 +22,12 @@ import TerritorySelect from './components/TerritorySelect'
 import MapLegend from './components/MapLegend'
 import LoadingIndicator from './components/LoadingIndicator'
 import { Button } from './components/ui/button'
-import { loadBackgroundHistory, loadBeachDataset } from './data/api'
+import {
+  historyPointFromTimeline,
+  loadBackgroundHistory,
+  loadBeachDataset,
+  loadEvolutionBeachHistories,
+} from './data/api'
 import { getCopy } from './i18n'
 import { recentHistory } from './lib/chart-history'
 import { lisbonDate, preferredForecastDate } from './lib/date-classification'
@@ -40,7 +45,12 @@ import {
   viewFromPath,
   type AppViewMode,
 } from './lib/view-route'
-import type { BeachDataset, BeachViewModel, TerritoryFilter } from './types'
+import type {
+  BeachDataset,
+  BeachViewModel,
+  HistoryPoint,
+  TerritoryFilter,
+} from './types'
 
 const PortugalMap = lazy(() => import('./components/PortugalMap'))
 const MetricHistoryChart = lazy(() => import('./components/MetricHistoryChart'))
@@ -90,6 +100,10 @@ function App() {
   const [locationsOpen, setLocationsOpen] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [selectionActive, setSelectionActive] = useState(false)
+  const [historyByBeachId, setHistoryByBeachId] = useState<
+    ReadonlyMap<string, HistoryPoint[]>
+  >(new Map())
+  const [selectedHistoryLoading, setSelectedHistoryLoading] = useState(false)
   const [viewMode, setViewMode] = useState<AppViewMode>(() =>
     viewFromPath(window.location.pathname),
   )
@@ -135,6 +149,62 @@ function App() {
       mountedRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    if (!dataset || !selectionActive || dataset.historyDates.length === 0) {
+      setSelectedHistoryLoading(false)
+      return
+    }
+    if (historyByBeachId.has(selectedId)) {
+      setSelectedHistoryLoading(false)
+      return
+    }
+
+    const recentDates = dataset.historyDates.slice(-30)
+    const start = recentDates[0]
+    const end = recentDates.at(-1)
+    if (!start || !end) return
+
+    const controller = new AbortController()
+    setSelectedHistoryLoading(true)
+    loadEvolutionBeachHistories([selectedId], start, end, controller.signal)
+      .then((result) => {
+        if (!mountedRef.current || controller.signal.aborted) return
+        const history = result.histories[0]
+        if (!history) return
+        setHistoryByBeachId((current) => {
+          const next = new Map(current)
+          next.set(
+            selectedId,
+            history.points.map((point) =>
+              historyPointFromTimeline(point, dataset.forecastDates),
+            ),
+          )
+          return next
+        })
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof DOMException &&
+          error.name === 'AbortError'
+        ) {
+          return
+        }
+        console.warn('Selected beach history loading failed:', error)
+      })
+      .finally(() => {
+        if (mountedRef.current && !controller.signal.aborted) {
+          setSelectedHistoryLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [
+    dataset,
+    historyByBeachId,
+    selectedId,
+    selectionActive,
+  ])
 
   function scheduleBackgroundHydration(initial: BeachDataset) {
     const run = () => {
@@ -418,7 +488,7 @@ function App() {
             aria-selected={viewMode === 'map'}
             onClick={() => navigateToView('map')}
           >
-            <Map size={16} />
+            <MapIcon size={16} />
             {copy.mapView}
           </button>
           <button
@@ -863,9 +933,21 @@ function App() {
                   </div>
                 </div>
                 <div className="history-chart">
+                  {selectedHistoryLoading && (
+                    <div className="chart-loading">
+                      <LoadingIndicator
+                        variant="compact"
+                        label={copy.loadingHistory}
+                      />
+                    </div>
+                  )}
                   <Suspense fallback={<div className="chart-loading" />}>
                     <MetricHistoryChart
-                      history={recentHistory(selectedBeach.history, 30)}
+                      history={recentHistory(
+                        historyByBeachId.get(selectedBeach.id) ??
+                          selectedBeach.history,
+                        30,
+                      )}
                       forecasts={selectedBeach.daily}
                       language={language}
                       windUnit={windUnit}

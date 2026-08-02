@@ -2,25 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   dataUrl,
   evolutionDefaultRange,
+  loadEvolutionBeachHistories,
+  loadEvolutionDate,
+  loadEvolutionSummary,
   loadBackgroundHistory,
   loadBeachDataset,
   loadBeachDayDetail,
-  loadTimelineMonth,
-  loadTimelineRange,
   resetDayDetailCache,
-  resetTimelineMonthCache,
+  resetEvolutionIndexCache,
   resolveDateIndex,
 } from './api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   resetDayDetailCache()
-  resetTimelineMonthCache()
+  resetEvolutionIndexCache()
 })
 
 beforeEach(() => {
   resetDayDetailCache()
-  resetTimelineMonthCache()
+  resetEvolutionIndexCache()
 })
 
 function rawAir(forecastDate: string) {
@@ -169,33 +170,19 @@ describe('published data loading', () => {
     ).toBe(false)
   })
 
-  it('loadBackgroundHistory populates historyDates from timeline and merges beach histories', async () => {
-    const timelineShard = {
-      schemaVersion: 1,
-      month: '2026-07',
-      dates: ['2026-07-24', '2026-07-25'],
-      points: [
-        { beachId: '10', date: '2026-07-24', waterMin: 17, waterMax: 20, airMin: 16, airMax: 26, windMinKnots: 4, windAverageKnots: 7, windMaxKnots: 10 },
-        { beachId: '10', date: '2026-07-25', waterMin: 17, waterMax: 20, airMin: 16, airMax: 26, windMinKnots: 4, windAverageKnots: 7, windMaxKnots: 10 },
-      ],
-      generatedAt: '2026-07-25T10:00:00.000Z',
-    }
+  it('loadBackgroundHistory loads only the bounded date index', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
       if (url === '/data/latest.json') return new Response(JSON.stringify(latestPayload()))
       if (url === '/data/beach-metadata.json') {
         return new Response(JSON.stringify(metadataPayload()))
       }
-      if (url === '/data/timeline/index.json') {
+      if (url === '/data/evolution/index.json') {
         return new Response(JSON.stringify({
           schemaVersion: 1,
           dates: ['2026-07-24', '2026-07-25'],
-          months: ['2026-07'],
           generatedAt: '2026-07-25T10:00:00.000Z',
         }))
-      }
-      if (url === '/data/timeline/2026-07.json') {
-        return new Response(JSON.stringify(timelineShard))
       }
       return new Response('', { status: 404 })
     })
@@ -206,62 +193,13 @@ describe('published data loading', () => {
 
     expect(hydrated.historyDates).toEqual(['2026-07-24', '2026-07-25'])
     expect(hydrated.beaches[0].history.map((point) => point.date)).toEqual([
-      '2026-07-24',
-      '2026-07-25',
       '2026-07-26',
       '2026-07-27',
       '2026-07-28',
     ])
-  })
-
-  it('loadBackgroundHistory hydrates at most 30 archive dates from timeline index', async () => {
-    const allDates = Array.from({ length: 35 }, (_, i) => {
-      const d = new Date('2026-06-24T12:00:00Z')
-      d.setUTCDate(d.getUTCDate() + i)
-      return d.toISOString().slice(0, 10)
-    })
-    const months = [...new Set(allDates.map((d) => d.slice(0, 7)))]
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
-      if (url === '/data/latest.json') return new Response(JSON.stringify(latestPayload()))
-      if (url === '/data/beach-metadata.json') {
-        return new Response(JSON.stringify(metadataPayload()))
-      }
-      if (url === '/data/timeline/index.json') {
-        return new Response(JSON.stringify({
-          schemaVersion: 1,
-          dates: allDates,
-          months,
-          generatedAt: '2026-07-28T10:00:00.000Z',
-        }))
-      }
-      for (const month of months) {
-        if (url === `/data/timeline/${month}.json`) {
-          return new Response(JSON.stringify({
-            schemaVersion: 1,
-            month,
-            dates: allDates.filter((d) => d.startsWith(month)),
-            points: allDates
-              .filter((d) => d.startsWith(month))
-              .map((date) => ({ beachId: '10', date, waterMin: 17, waterMax: 20 })),
-            generatedAt: '2026-07-28T10:00:00.000Z',
-          }))
-        }
-      }
-      return new Response('', { status: 404 })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const initial = await loadBeachDataset()
-    const hydrated = await loadBackgroundHistory(initial)
-
-    expect(hydrated.historyDates).toHaveLength(35)
-    const historyDates = hydrated.beaches[0].history
-      .filter((p) => p.kind === 'history')
-      .map((p) => p.date)
-    expect(historyDates.length).toBeLessThanOrEqual(30)
-    const expected30 = allDates.slice(-30)
-    expect(historyDates[0]).toBe(expected30[0])
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain(
+      '/data/timeline/2026-07.json',
+    )
   })
 
   it('rejects invalid published timestamps and empty display windows', async () => {
@@ -292,7 +230,7 @@ describe('published data loading', () => {
 
 describe('beach day detail loading', () => {
   it('returns parsed data on a valid response', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_input: string | URL | Request) =>
       new Response(
         JSON.stringify({
           schemaVersion: 1,
@@ -418,7 +356,7 @@ describe('beach day detail loading', () => {
   it('refreshes current and future detail after sixty seconds', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-29T12:00:00.000Z'))
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_input: string | URL | Request) =>
       new Response(
         JSON.stringify({
           schemaVersion: 1,
@@ -442,234 +380,84 @@ describe('beach day detail loading', () => {
   })
 })
 
-describe('timeline loading', () => {
-  it('loadTimelineMonth deduplicates concurrent requests', async () => {
-    let calls = 0
-    const fetchMock = vi.fn(async () => {
-      calls += 1
-      await Promise.resolve()
-      return new Response(
-        JSON.stringify({
-          schemaVersion: 1,
-          month: '2026-07',
-          dates: ['2026-07-25'],
-          points: [{ beachId: '10', date: '2026-07-25', waterMax: 20 }],
-          generatedAt: '2026-07-25T10:00:00.000Z',
-        }),
-      )
-    })
+describe('bounded evolution loading', () => {
+  it('loads a server-computed territory summary', async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request) =>
+      new Response(JSON.stringify({
+        schemaVersion: 1,
+        start: '2026-07-25',
+        end: '2026-07-31',
+        dates: ['2026-07-25'],
+        aggregates: [{
+          date: '2026-07-25',
+          water: { min: 17, avg: 19, max: 21, coverage: 1 },
+          air: null,
+          wind: null,
+        }],
+        generatedAt: '2026-07-31T10:00:00.000Z',
+      })),
+    )
     vi.stubGlobal('fetch', fetchMock)
 
-    const [first, second] = await Promise.all([
-      loadTimelineMonth('2026-07'),
-      loadTimelineMonth('2026-07'),
-    ])
-
-    expect(first).toEqual(second)
-    expect(calls).toBe(1)
+    const result = await loadEvolutionSummary(
+      '2026-07-25',
+      '2026-07-31',
+      'mainland',
+    )
+    expect(result.aggregates).toHaveLength(1)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      '/data/evolution/summary.json?start=2026-07-25&end=2026-07-31&territory=mainland',
+    )
   })
 
-  it('loadTimelineMonth retries after rejection', async () => {
+  it('loads one historical map date and selected beach histories', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response('', { status: 500 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            schemaVersion: 1,
-            month: '2026-07',
-            dates: ['2026-07-25'],
-            points: [],
-            generatedAt: '2026-07-25T10:00:00.000Z',
-          }),
-        ),
-      )
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(loadTimelineMonth('2026-07')).rejects.toThrow(
-      'Published timeline is unavailable for 2026-07',
-    )
-    await expect(loadTimelineMonth('2026-07')).resolves.toMatchObject({
-      month: '2026-07',
-    })
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-  })
-
-  it('refreshes the current month after the in-memory TTL', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-07-29T10:00:00Z'))
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          schemaVersion: 1,
-          month: '2026-07',
-          dates: ['2026-07-29'],
-          points: [],
-          generatedAt: new Date().toISOString(),
-        }),
-      ),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    await loadTimelineMonth('2026-07')
-    await loadTimelineMonth('2026-07')
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-
-    await vi.advanceTimersByTimeAsync(60_001)
-    await loadTimelineMonth('2026-07')
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    vi.useRealTimers()
-  })
-
-  it('loadTimelineRange computes correct month intersection', async () => {
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
-      if (url.endsWith('/timeline/2026-06.json')) {
-        return new Response(
-          JSON.stringify({
-            schemaVersion: 1,
-            month: '2026-06',
-            dates: ['2026-06-30'],
-            points: [{ beachId: '10', date: '2026-06-30', waterMax: 19 }],
-            generatedAt: '2026-07-01T10:00:00.000Z',
-          }),
-        )
-      }
-      if (url.endsWith('/timeline/2026-07.json')) {
-        return new Response(
-          JSON.stringify({
-            schemaVersion: 1,
-            month: '2026-07',
-            dates: ['2026-07-01', '2026-07-14'],
-            points: [
-              { beachId: '10', date: '2026-07-01', waterMax: 20 },
-              { beachId: '10', date: '2026-07-14', waterMax: 21 },
-            ],
-            generatedAt: '2026-07-14T10:00:00.000Z',
-          }),
-        )
-      }
-      return new Response('', { status: 404 })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const loaded = await loadTimelineRange(
-      {
-        generatedAt: '2026-07-15T10:00:00.000Z',
-        forecastUpdatedAt: '2026-07-15T10:00:00.000Z',
-        catalogSize: 1,
-        availableCount: 1,
-        forecastDates: ['2026-07-15', '2026-07-16', '2026-07-17'],
-        historyDates: [],
-        districtWeather: [],
-        unavailableLocations: [],
-        beaches: [{
-          id: '10',
-          name: 'Carcavelos',
-          territory: 'mainland',
-          district: 'Lisboa',
-          municipality: 'Cascais',
-          latitude: 0,
-          longitude: 0,
-          sourceLatitude: 0,
-          sourceLongitude: 0,
-          daily: [
-            {
-              date: '2026-07-15',
-              waterMin: 18,
-              waterMax: 21,
-              waterMinHour: null,
-              waterMaxHour: null,
-              windMinKnots: 5,
-              windMaxKnots: 10,
-              windMinHour: null,
-              windMaxHour: null,
-              windAverageKnots: 8,
-              windAt13Knots: 8,
-              airMin: 17,
-              airMax: 27,
-              airMinHour: null,
-              airMaxHour: null,
-              airLocation: 'Lisboa',
-              airDistanceKm: 1,
-            },
-          ],
-          history: [{
-            date: '2026-07-15',
-            label: '15 Jul',
-            kind: 'current',
-            waterMin: 18,
-            waterMax: 21,
-            airMin: 17,
-            airMax: 27,
-            windMinKnots: 5,
-            windAverageKnots: 8,
-            windMaxKnots: 10,
-          }],
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        schemaVersion: 1,
+        date: '2026-07-25',
+        points: [{ beachId: '10', date: '2026-07-25', waterMax: 20 }],
+        generatedAt: '2026-07-31T10:00:00.000Z',
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        schemaVersion: 1,
+        start: '2026-07-25',
+        end: '2026-07-31',
+        histories: [{
+          beachId: '10',
+          points: [{ beachId: '10', date: '2026-07-25', waterMax: 20 }],
         }],
-      },
-      '2026-06-30',
-      '2026-07-17',
-    )
-
-    expect(
-      fetchMock.mock.calls.map(([input]) => String(input)),
-    ).toEqual([
-      '/data/timeline/2026-06.json',
-      '/data/timeline/2026-07.json',
-    ])
-    expect(loaded.beaches[0].history.map((point) => point.date)).toEqual([
-      '2026-06-30',
-      '2026-07-01',
-      '2026-07-14',
-      '2026-07-15',
-    ])
-  })
-
-  it('one-year range issues at most 12 month loads', async () => {
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input)
-      const monthMatch = /\/data\/timeline\/(\d{4}-\d{2})\.json$/.exec(url)
-      if (monthMatch) {
-        const month = monthMatch[1]!
-        return new Response(
-          JSON.stringify({
-            schemaVersion: 1,
-            month,
-            dates: [],
-            points: [],
-            generatedAt: '2026-07-01T00:00:00.000Z',
-          }),
-        )
-      }
-      return new Response('', { status: 404 })
-    })
+        generatedAt: '2026-07-31T10:00:00.000Z',
+      })))
     vi.stubGlobal('fetch', fetchMock)
 
-    const dataset: Parameters<typeof loadTimelineRange>[0] = {
-      generatedAt: '2026-07-01T00:00:00.000Z',
-      forecastUpdatedAt: '2026-07-01T00:00:00.000Z',
-      catalogSize: 0,
-      availableCount: 0,
-      forecastDates: ['2026-07-01', '2026-07-02', '2026-07-03'],
-      historyDates: [],
-      districtWeather: [],
-      unavailableLocations: [],
-      beaches: [],
-    }
-    await loadTimelineRange(
-      dataset,
-      '2025-07-01',
-      '2026-07-03',
-      new Date('2026-07-01T12:00:00Z'),
-    )
+    await expect(
+      loadEvolutionDate('2026-07-25', 'mainland'),
+    ).resolves.toMatchObject({ date: '2026-07-25' })
+    await expect(
+      loadEvolutionBeachHistories(
+        ['10'],
+        '2026-07-25',
+        '2026-07-31',
+      ),
+    ).resolves.toMatchObject({
+      histories: [{ beachId: '10' }],
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
 
-    const monthUrls = fetchMock.mock.calls
-      .map(([input]) => String(input))
-      .filter((url) => url.includes('/timeline/') && url.endsWith('.json') && !url.includes('index'))
-    expect(monthUrls).toHaveLength(12)
-    expect(monthUrls[0]).toContain('2025-07')
-    expect(monthUrls[11]).toContain('2026-06')
+  it('surfaces bounded endpoint failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 429 })),
+    )
+    await expect(
+      loadEvolutionBeachHistories(
+        ['10'],
+        '2026-07-25',
+        '2026-07-31',
+      ),
+    ).rejects.toThrow('(429)')
   })
 })
 
@@ -699,21 +487,23 @@ describe('evolutionDefaultRange', () => {
 describe('dataUrl', () => {
   it('falls back to public asset path when API base is not set', () => {
     expect(dataUrl('latest.json', undefined, '/')).toBe('/data/latest.json')
-    expect(dataUrl('history/index.json', undefined, '/')).toBe('/data/history/index.json')
-    expect(dataUrl('history/2026-07-25.json', undefined, '/AguaDaPraia/')).toBe(
-      '/AguaDaPraia/data/history/2026-07-25.json',
+    expect(dataUrl('evolution/index.json', undefined, '/')).toBe(
+      '/data/evolution/index.json',
     )
   })
 
   it('strips .json suffix and prepends API base when configured', () => {
     expect(dataUrl('latest.json', '/api/data')).toBe('/api/data/latest')
-    expect(dataUrl('history/index.json', '/api/data')).toBe('/api/data/history/index')
-    expect(dataUrl('timeline/index.json', '/api/data')).toBe('/api/data/timeline/index')
-    expect(dataUrl('history/2026-07-25.json', '/api/data')).toBe(
-      '/api/data/history/2026-07-25',
+    expect(dataUrl('evolution/index.json', '/api/data')).toBe(
+      '/api/data/evolution/index',
     )
-    expect(dataUrl('beach/10/day/2026-07-29.json', '/api/data')).toBe(
-      '/api/data/beach/10/day/2026-07-29',
+    expect(
+      dataUrl(
+        'evolution/summary.json?start=2026-07-25&end=2026-07-31',
+        '/api/data',
+      ),
+    ).toBe(
+      '/api/data/evolution/summary?start=2026-07-25&end=2026-07-31',
     )
   })
 

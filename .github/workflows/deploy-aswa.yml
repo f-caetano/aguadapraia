@@ -38,6 +38,16 @@ jobs:
             exit 1
           fi
 
+      - name: Validate API compatibility
+        env:
+          VITE_DATA_API_BASE: ${{ vars.VITE_DATA_API_BASE }}
+        run: |
+          curl --fail --silent --show-error \
+            --retry 3 --retry-all-errors --max-time 30 \
+            "${VITE_DATA_API_BASE%/}/evolution/index" \
+            --output evolution-index.json
+          node -e "const data = require('./evolution-index.json'); if (data.schemaVersion !== 1 || !Array.isArray(data.dates)) process.exit(1)"
+
       - name: Build frontend
         env:
           # Full Container Apps API base URL — set as repository variable
