@@ -47,6 +47,8 @@ import {
   adaptiveClusterRadius,
   clusterZoomLevel,
   initialMapTransform,
+  mapHeight,
+  mapWidth,
   territoryClusterProfile,
 } from '../lib/map-transform'
 import { convertWind, formatWind, type WindUnit } from '../lib/units'
@@ -91,8 +93,6 @@ type WeatherKind =
   | 'storm'
   | 'rain'
 
-const mapWidth = 900
-const mapHeight = 680
 const maxZoom = 16
 
 const districtFeatureIndexByLocation = new Map<number, number>([

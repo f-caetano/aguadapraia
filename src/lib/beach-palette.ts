@@ -1,4 +1,4 @@
-export const BEACH_PALETTE = [
+const BEACH_PALETTE = [
   'var(--beach-0)',
   'var(--beach-1)',
   'var(--beach-2)',

@@ -4,7 +4,6 @@ import {
   isPreferredMetricValue,
   mapMetricValue,
   windColourClass,
-  windLegendLabels,
 } from './map-metric'
 import type { DailyBeachForecast } from '../types'
 
@@ -38,14 +37,5 @@ describe('map metric helpers', () => {
     expect(isPreferredMetricValue(31, 29, 'air')).toBe(true)
     expect(isPreferredMetricValue(4, 8, 'wind')).toBe(true)
     expect(isPreferredMetricValue(10, 8, 'wind')).toBe(false)
-  })
-
-  it('converts wind legend boundaries to the selected unit', () => {
-    expect(windLegendLabels('knots')).toEqual([
-      '<5 kn', '5–<10 kn', '10–<15 kn', '15–<20 kn', '20+ kn',
-    ])
-    expect(windLegendLabels('kmh')).toEqual([
-      '<9.3 km/h', '9.3–<18.5 km/h', '18.5–<27.8 km/h', '27.8–<37.0 km/h', '37.0+ km/h',
-    ])
   })
 })

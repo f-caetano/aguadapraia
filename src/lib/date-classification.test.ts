@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyDate,
-  evolutionDates,
   preferredForecastDate,
 } from './date-classification'
 
@@ -48,22 +47,5 @@ describe('preferredForecastDate', () => {
     expect(preferredForecastDate(['2026-07-24', '2026-07-25'], now)).toBe(
       '2026-07-24',
     )
-  })
-})
-
-describe('evolutionDates', () => {
-  it('dedupes, sorts, and merges history with forecast dates', () => {
-    expect(
-      evolutionDates(
-        ['2026-07-24', '2026-07-26', '2026-07-25'],
-        ['2026-07-26', '2026-07-27', '2026-07-28'],
-      ),
-    ).toEqual([
-      '2026-07-24',
-      '2026-07-25',
-      '2026-07-26',
-      '2026-07-27',
-      '2026-07-28',
-    ])
   })
 })

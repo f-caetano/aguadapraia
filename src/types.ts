@@ -101,7 +101,7 @@ export interface TerritoryAggregate {
   wind: { min: number; avg: number; max: number; coverage: number } | null
 }
 
-export interface UnavailableLocation {
+interface UnavailableLocation {
   id: string
   name: string
 }

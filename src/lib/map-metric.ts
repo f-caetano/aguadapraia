@@ -38,18 +38,3 @@ export function formatMapMetricValue(
   }
   return `${value.toFixed(metric === 'air' ? 0 : 1)} °C`
 }
-
-export function windLegendLabels(windUnit: WindUnit): string[] {
-  const unit = windUnit === 'kmh' ? 'km/h' : 'kn'
-  const boundaries = [5, 10, 15, 20].map((knots) => {
-    const converted = convertWind(knots, windUnit)
-    return windUnit === 'kmh' ? converted.toFixed(1) : String(converted)
-  })
-  return [
-    `<${boundaries[0]} ${unit}`,
-    `${boundaries[0]}–<${boundaries[1]} ${unit}`,
-    `${boundaries[1]}–<${boundaries[2]} ${unit}`,
-    `${boundaries[2]}–<${boundaries[3]} ${unit}`,
-    `${boundaries[3]}+ ${unit}`,
-  ]
-}

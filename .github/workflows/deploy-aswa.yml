@@ -29,6 +29,11 @@ jobs:
       - name: Install root dependencies
         run: npm ci
 
+      - name: Validate frontend
+        run: |
+          npm test
+          npm run lint
+
       - name: Validate VITE_DATA_API_BASE
         env:
           VITE_DATA_API_BASE: ${{ vars.VITE_DATA_API_BASE }}

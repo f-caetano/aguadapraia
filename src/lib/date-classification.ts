@@ -32,12 +32,3 @@ export function classifyDate(
   if (date === today) return 'current'
   return 'forecast'
 }
-
-/** All Evolution timeline dates: history + forecast, deduped and sorted. */
-export function evolutionDates(
-  historyDates: readonly string[],
-  forecastDates: readonly string[],
-): string[] {
-  const all = new Set([...historyDates, ...forecastDates])
-  return [...all].sort()
-}

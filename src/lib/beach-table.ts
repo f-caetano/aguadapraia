@@ -11,7 +11,7 @@ export type SortKey =
   | 'airMax'
   | 'windAvg'
 
-export type SortDir = 'asc' | 'desc'
+type SortDir = 'asc' | 'desc'
 
 export interface TableSortState {
   key: SortKey
