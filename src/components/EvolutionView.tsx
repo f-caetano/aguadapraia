@@ -250,6 +250,7 @@ export default function EvolutionView({
   const dateRequestRef = useRef<AbortController | null>(null)
   const historyRequestRef = useRef<AbortController | null>(null)
   const datePrefetchesRef = useRef(new Set<string>())
+  const isPlayingRef = useRef(false)
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
   const [isMobile, setIsMobile] = useState(
     () =>
@@ -298,6 +299,10 @@ export default function EvolutionView({
   const tokenRef = useRef(0)
   const [availableHistoryDates, setAvailableHistoryDates] = useState<string[]>([])
   const [availableHistoryLoaded, setAvailableHistoryLoaded] = useState(false)
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying
+  }, [isPlaying])
 
   useEffect(() => {
     activeRef.current = true
@@ -463,7 +468,12 @@ export default function EvolutionView({
             return next
           })
         })
-        .catch(() => undefined)
+        .catch(() => {
+          if (activeRef.current && isPlayingRef.current) {
+            setIsPlaying(false)
+            setRangeError(copy.dataUnavailable)
+          }
+        })
         .finally(() => {
           datePrefetchesRef.current.delete(key)
         })
@@ -474,7 +484,12 @@ export default function EvolutionView({
     dataset.forecastDates,
     datePointsByKey,
     territory,
+    copy.dataUnavailable,
   ])
+
+  useEffect(() => {
+    if (isPlaying) prefetchFollowingDates()
+  }, [isPlaying, prefetchFollowingDates])
 
   useEffect(() => {
     if (!activeDate || activeKind !== 'history') {
@@ -999,10 +1014,15 @@ export default function EvolutionView({
           return current
         }
         const nextDate = allDates[next]
+        const nextKey = `${territory}|${nextDate}`
         if (
           classifyDate(nextDate, dataset.forecastDates) === 'history' &&
-          !datePointsByKey.has(`${territory}|${nextDate}`)
+          !datePointsByKey.has(nextKey)
         ) {
+          if (!datePrefetchesRef.current.has(nextKey)) {
+            setIsPlaying(false)
+            setRangeError(copy.dataUnavailable)
+          }
           return current
         }
         if (next >= allDates.length - 1) {
@@ -1017,6 +1037,7 @@ export default function EvolutionView({
     }
   }, [
     allDates,
+    copy.dataUnavailable,
     dataset.forecastDates,
     dateIndex,
     datePointsByKey,
